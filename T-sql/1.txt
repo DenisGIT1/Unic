@@ -1,0 +1,191 @@
+/*
+
+============ метод вычислительной математики ========================
+
+
+код состоит из двух частей. Первая часть это сама функция,
+вторая часть со слов (-- Тестовая процедура (с заданными данными)) - проверка работы
+В целом алгоритм на столько эффективен что находит за одну итерацию,
+для более сложных случаев (что бы убедиться в его работе),
+необходимо уменьшить параметр "@tolerance DECIMAL(12,4)", например с 0.01 до 0.0001.
+*/
+
+ALTER PROCEDURE CalcPricesNewton
+    @InputPriceWithNDS DECIMAL(15,4),
+    @ProcNDS DECIMAL(5,2),
+    @CorrectedPriceWithNDS DECIMAL(10,2) OUTPUT,
+    @CorrectedPriceWithoutNDS DECIMAL(10,2) OUTPUT,
+    @Iterations INT OUTPUT
+AS
+BEGIN
+    DECLARE @k DECIMAL(10,4) = 1 + @ProcNDS / 100.0;  -- Коэффициент НДС
+    DECLARE @x DECIMAL(10,2) = 0.00;  -- Текущее приближение цены без НДС
+    DECLARE @f_x DECIMAL(12,4);  -- f(x) = x * k - target (без ROUND для точного приближения)
+    DECLARE @target DECIMAL(15,4) = @InputPriceWithNDS;  -- Целевая цена с НДС (с сохранением точности)
+    DECLARE @derivative DECIMAL(10,4) = @k;  -- f'(x) = k
+    DECLARE @correction DECIMAL(10,4);  -- Корректировка x
+    DECLARE @prevError DECIMAL(12,4) = 999999.99;  -- Предыдущая ошибка для проверки сходимости
+    DECLARE @currentError DECIMAL(12,4);  -- Текущая ошибка
+    DECLARE @iteration INT = 0;  -- Счётчик итераций
+    DECLARE @maxIterations INT = 20;  -- Максимум для безопасности
+    DECLARE @tolerance DECIMAL(12,4) = 0.01;  -- Точность остановки (|f(x)| < tolerance)
+    DECLARE @stepScale DECIMAL(10,2) = 1.00;  -- Масштаб корректировки (для больших цен)
+    DECLARE @offset DECIMAL(10,2) = 0.50;  -- Диапазон поиска для дискретного подбора
+
+    -- Обработка крайних случаев 
+    IF @ProcNDS < 0 OR @ProcNDS >= 100 OR @InputPriceWithNDS < 0
+    BEGIN
+        SET @CorrectedPriceWithoutNDS = 0.00;
+        SET @CorrectedPriceWithNDS = 0.00;
+        SET @Iterations = 0;  -- Для крайних случаев
+        RETURN;
+    END
+    IF @ProcNDS = 0
+    BEGIN
+        SET @CorrectedPriceWithoutNDS = ROUND(@InputPriceWithNDS, 2);
+        SET @CorrectedPriceWithNDS = ROUND(@InputPriceWithNDS, 2);
+        SET @Iterations = 0;  -- Без итераций
+        RETURN;
+    END
+    IF @InputPriceWithNDS = 0
+    BEGIN
+        SET @CorrectedPriceWithoutNDS = 0.00;
+        SET @CorrectedPriceWithNDS = 0.00;
+        SET @Iterations = 0;  -- Без итераций
+        RETURN;
+    END
+
+    -- Устанавливаем скорректированную цену с НДС как округлённый ввод
+    SET @CorrectedPriceWithNDS = ROUND(@InputPriceWithNDS, 2);
+
+    -- Начальное приближение: x0 = target / k (округлённое)
+    SET @x = ROUND(@target / @k, 2);
+
+    -- Адаптация для больших цен: увеличиваем масштаб корректировки и offset для быстрой сходимости
+    IF @InputPriceWithNDS > 100.00
+    BEGIN
+        SET @stepScale = 1.10;
+        SET @offset = 1.00;
+    END
+
+    -- Итерации метода Ньютона (теперь минимизируем |x * k - target| без промежуточного ROUND)
+    WHILE @iteration < @maxIterations
+    BEGIN
+        SET @iteration = @iteration + 1;
+
+        -- Вычисление f(x)
+        SET @f_x = (@x * @k) - @target;
+        SET @currentError = ABS(@f_x);
+
+        -- Проверка на сходимость
+        IF @currentError < @tolerance OR @currentError >= @prevError  -- Если ошибка не уменьшается, останавливаемся
+        BEGIN
+            BREAK;
+        END
+
+        -- Корректировка: x = x - f(x) / f'(x) * stepScale
+        SET @correction = (@f_x / @derivative) * @stepScale;
+        SET @x = ROUND(@x - @correction, 2);
+
+        -- Не даём уйти в отрицательные значения
+        IF @x < 0 SET @x = 0.00;
+
+        SET @prevError = @currentError;
+    END
+
+    -- Финальная дискретная корректировка: поиск в диапазоне [@x - @offset, @x + @offset] с шагом 0.01
+    -- Проверяем только значения, где x * k точно равно ROUND(x * k, 2), и выбираем с минимальной |x * k - target|
+    DECLARE @bestX DECIMAL(10,2) = NULL;
+    DECLARE @bestWith DECIMAL(10,2) = NULL;
+    DECLARE @minError DECIMAL(12,4) = 999999.99;
+    DECLARE @candidate DECIMAL(10,2) = ROUND(@x - @offset, 2);
+    DECLARE @maxCandidate DECIMAL(10,2) = ROUND(@x + @offset, 2);
+
+    WHILE @candidate <= @maxCandidate
+    BEGIN
+        IF @candidate >= 0
+        BEGIN
+            DECLARE @calcWith DECIMAL(12,4) = @candidate * @k;
+            IF @calcWith = ROUND(@calcWith, 2)
+            BEGIN
+                DECLARE @error DECIMAL(12,4) = ABS(@calcWith - @target);
+                IF @error < @minError
+                BEGIN
+                    SET @minError = @error;
+                    SET @bestX = @candidate;
+                    SET @bestWith = ROUND(@calcWith, 2);
+                END
+            END
+        END
+        SET @candidate = ROUND(@candidate + 0.01, 2);
+    END
+
+    IF @bestX IS NOT NULL
+    BEGIN
+        SET @CorrectedPriceWithoutNDS = @bestX;
+        SET @CorrectedPriceWithNDS = @bestWith;
+    END
+    ELSE
+    BEGIN
+        SET @CorrectedPriceWithoutNDS = @x;
+        SET @CorrectedPriceWithNDS = ROUND(@x * @k, 2);
+    END
+
+    SET @Iterations = @iteration;
+END
+GO
+
+-- Тестовая процедура (с заданными данными)
+ALTER PROCEDURE TestCalcPricesNewton
+AS
+BEGIN
+    -- Создаём временную таблицу для тестовых случаев
+    DECLARE @testCases TABLE (
+        TestID INT IDENTITY(1,1),
+        InputPriceWithNDS DECIMAL(15,4),
+        ProcNDS DECIMAL(5,2),
+        ExpectedWithNDS DECIMAL(10,2),
+        ExpectedWithoutNDS DECIMAL(10,2)
+    );
+
+    -- Вставляем тестовые данные
+    INSERT INTO @testCases VALUES
+        (1.81, 20, 1.80, 1.50),
+        (1.81, 18, 1.77, 1.50), 
+        (0.00, 20, 0.00, 0.00),
+        (50.00, 0, 50.00, 50.00),
+        (100.00, 999, 0.00, 0.00),
+        (-10.00, 20, 0.00, 0.00),
+        (10.00, -5, 0.00, 0.00),
+        (10.00, 108, 0.00, 0.00),
+        (1266773.46, 22, 1266773.46, 1038333.82);
+
+    DECLARE @CorrectedPriceWithNDS DECIMAL(10,2);
+    DECLARE @CorrectedPriceWithoutNDS DECIMAL(10,2);
+    DECLARE @Iterations INT;
+
+    DECLARE @TestID INT = 1;
+    DECLARE @MaxTestID INT = (SELECT MAX(TestID) FROM @testCases);
+
+    WHILE @TestID <= @MaxTestID
+    BEGIN
+        DECLARE @InputPriceWithNDS DECIMAL(15,4);
+        DECLARE @ProcNDS DECIMAL(5,2);
+
+        SELECT @InputPriceWithNDS = InputPriceWithNDS,
+               @ProcNDS = ProcNDS
+        FROM @testCases
+        WHERE TestID = @TestID;
+
+        EXEC CalcPricesNewton @InputPriceWithNDS, @ProcNDS, @CorrectedPriceWithNDS OUTPUT, @CorrectedPriceWithoutNDS OUTPUT, @Iterations OUTPUT;
+        PRINT 'Input: ' + CAST(@InputPriceWithNDS AS VARCHAR) + ', NDS%: ' + CAST(@ProcNDS AS VARCHAR) +
+              ' -> WithNDS: ' + CAST(@CorrectedPriceWithNDS AS VARCHAR) +
+              ', WithoutNDS: ' + CAST(@CorrectedPriceWithoutNDS AS VARCHAR) +
+              ', Iterations: ' + CAST(@Iterations AS VARCHAR);
+
+        SET @TestID = @TestID + 1;
+    END
+END
+GO
+
+EXEC TestCalcPricesNewton;

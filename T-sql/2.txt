@@ -1,0 +1,153 @@
+/*
+===================== Локальный поиск с ветвлением от центра (аналог градиентного спуска)  ========================
+
+
+
+метод ищет оптимальную цену путём последовательного перебора значений вокруг начальной оценки (округлённой до 2 знаков),
+проверяя соседние варианты с шагом ±0.01, как ветвящееся дерево.
+Останавливается, если ошибка начинает увеличиваться (достигнут минимум) или после 10 шагов в каждую сторону.
+
+
+*/
+
+ALTER PROCEDURE CalcPrices
+    @InputPriceWithNDS DECIMAL(10,2),
+    @ProcNDS DECIMAL(5,2),
+    @CorrectedPriceWithNDS DECIMAL(10,2) OUTPUT,
+    @CorrectedPriceWithoutNDS DECIMAL(10,2) OUTPUT,
+    @Iterations INT = 0 OUTPUT
+AS
+BEGIN
+    DECLARE @k DECIMAL(10,4) = 1 + @ProcNDS / 100.0;  -- Коэффициент НДС
+    DECLARE @basePrice DECIMAL(10,2);  -- Базовая цена без НДС
+    DECLARE @currentPrice DECIMAL(10,2);  -- Текущая цена для проверки
+    DECLARE @bestPrice DECIMAL(10,2);  -- Лучшая цена без НДС
+    DECLARE @bestError DECIMAL(10,4) = 999999.0;  -- Минимальная ошибка
+    DECLARE @step DECIMAL(10,2) = 0.01;  -- Шаг перебора
+    DECLARE @maxSteps INT = 10;  -- Максимум шагов в одну сторону (глубина дерева)
+    DECLARE @direction INT;  -- Направление: -1 (влево), +1 (вправо)
+    DECLARE @offset DECIMAL(10,2) = 0.10;  -- Стандартный диапазон (±0.10)
+    DECLARE @i INT;  -- Счётчик шагов
+
+    SET @Iterations = 0;  -- Инициализация счётчика итераций
+
+    -- Обработка крайних случаев
+    IF @ProcNDS <= 0 OR @ProcNDS >= 99 OR @InputPriceWithNDS < 0
+    BEGIN
+        SET @CorrectedPriceWithoutNDS = 0.00;
+        SET @CorrectedPriceWithNDS = 0.00;
+        RETURN;
+    END
+
+    -- Расчёт базовой цены
+    SET @basePrice = ROUND(@InputPriceWithNDS / @k, 2);
+    SET @bestPrice = @basePrice;
+
+    -- Адаптация диапазона
+    IF @InputPriceWithNDS > 100.00
+        SET @offset = 0.20;
+    ELSE IF @InputPriceWithNDS < 1.00
+        SET @offset = 0.05;
+
+    -- Проверка базовой цены
+    DECLARE @baseTemp DECIMAL(20,10) = @basePrice * @k;
+    IF @baseTemp = ROUND(@baseTemp, 2)
+    BEGIN
+        SET @bestError = ABS(ROUND(@baseTemp, 2) - @InputPriceWithNDS);
+        SET @Iterations = @Iterations + 1;
+        SET @CorrectedPriceWithNDS = ROUND(@baseTemp, 2);
+    END
+
+    -- Ветвление: проверка влево и вправо
+    SET @direction = -1;  -- Начинаем с левой стороны
+    WHILE @direction <= 1
+    BEGIN
+        SET @i = 1;
+        WHILE @i <= @maxSteps
+        BEGIN
+            SET @currentPrice = @basePrice + @direction * @i * @step;
+            IF @currentPrice < 0  -- Не допускаем отрицательные цены
+                BREAK;
+            DECLARE @temp DECIMAL(20,10) = @currentPrice * @k;
+            IF @temp = ROUND(@temp, 2)  -- Проверяем, что не требует округления
+            BEGIN
+                DECLARE @currentWithNDS DECIMAL(10,2) = ROUND(@temp, 2);
+                DECLARE @currentError DECIMAL(10,4) = ABS(@currentWithNDS - @InputPriceWithNDS);
+                SET @Iterations = @Iterations + 1;
+                IF @currentError < @bestError
+                BEGIN
+                    SET @bestError = @currentError;
+                    SET @bestPrice = @currentPrice;
+                    SET @CorrectedPriceWithNDS = @currentWithNDS;
+                END
+                -- Ранняя остановка: если ошибка маленькая
+                IF @currentError < 0.005
+                    BREAK;
+            END
+            SET @i = @i + 1;
+        END
+        SET @direction = @direction + 2;  -- Переход к правой стороне
+    END
+
+    -- Финальные расчёты
+    IF @bestPrice IS NULL  -- Если ничего не найдено, используем базовую
+    BEGIN
+        SET @CorrectedPriceWithoutNDS = @basePrice;
+        SET @CorrectedPriceWithNDS = ROUND(@basePrice * @k, 2);
+    END
+    ELSE
+    BEGIN
+        SET @CorrectedPriceWithoutNDS = @bestPrice;
+        -- CorrectedPriceWithNDS уже установлена
+    END
+END
+GO
+
+-- Пример тестовой процедуры (аналогично предыдущей)
+ALTER PROCEDURE TestCalcPrices
+AS
+BEGIN
+    DECLARE @testCases TABLE (
+        InputPriceWithNDS DECIMAL(10,2),
+        ProcNDS DECIMAL(5,2),
+        ExpectedWithNDS DECIMAL(10,2),
+        ExpectedWithoutNDS DECIMAL(10,2)
+    );
+    INSERT INTO @testCases VALUES
+        (1.81, 20, 1.80, 1.50),
+        (1.81, 18, 1.77, 1.50), 
+        (0.00, 20, 0.00, 0.00),
+        (50.00, 0, 50.00, 50.00),
+        (100.00, 999, 0.00, 0.00),
+        (-10.00, 20, 0.00, 0.00),
+        (10.00, -5, 0.00, 0.00),
+        (10.00, 108, 0.00, 0.00),
+        (1266773.46, 22, 1266773.46, 1038333.82);
+    
+    DECLARE @startTime DATETIMEOFFSET = SYSDATETIMEOFFSET();
+
+    DECLARE @InputPriceWithNDS DECIMAL(10,2), @ProcNDS DECIMAL(5,2),
+            @CorrectedPriceWithNDS DECIMAL(10,2), @CorrectedPriceWithoutNDS DECIMAL(10,2),
+            @Iterations INT;
+
+    DECLARE test_cursor CURSOR FOR SELECT InputPriceWithNDS, ProcNDS FROM @testCases;
+    OPEN test_cursor;
+    FETCH NEXT FROM test_cursor INTO @InputPriceWithNDS, @ProcNDS;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        EXEC CalcPrices @InputPriceWithNDS, @ProcNDS, @CorrectedPriceWithNDS OUTPUT, @CorrectedPriceWithoutNDS OUTPUT, @Iterations OUTPUT;
+        PRINT 'Input: ' + CAST(@InputPriceWithNDS AS VARCHAR) + ', NDS%: ' + CAST(@ProcNDS AS VARCHAR) +
+              ' -> WithNDS: ' + CAST(@CorrectedPriceWithNDS AS VARCHAR) +
+              ', WithoutNDS: ' + CAST(@CorrectedPriceWithoutNDS AS VARCHAR) +
+              ', Iterations: ' + CAST(@Iterations AS VARCHAR);
+        FETCH NEXT FROM test_cursor INTO @InputPriceWithNDS, @ProcNDS;
+    END
+
+    CLOSE test_cursor;
+    DEALLOCATE test_cursor;
+    
+END
+GO
+
+EXEC TestCalcPrices;

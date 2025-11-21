@@ -1,0 +1,131 @@
+
+
+/*
+
+======================= метод подбора   ===================
+
+Основан на методе исчерпывающего поиска,
+это алгоритм для поиска минимума ошибки путём последовательного перебора решений
+в заданном диапазоне (±0.50 или ±1.00 от базовой цены) с фиксированным шагом 0.01,
+вычисляя цену для каждого и выбирая вариант с наименьшей абсолютной ошибкой.
+
+*/
+
+
+ALTER PROCEDURE CalcPricesBruteForce
+    @InputPriceWithNDS DECIMAL(10,2),
+    @ProcNDS DECIMAL(5,2),
+    @CorrectedPriceWithNDS DECIMAL(10,2) OUTPUT,
+    @CorrectedPriceWithoutNDS DECIMAL(10,2) OUTPUT
+AS
+BEGIN
+    DECLARE @k DECIMAL(10,4) = 1 + @ProcNDS / 100.0;  -- Коэффициент НДС
+    DECLARE @basePrice DECIMAL(10,2);  -- Базовая цена без НДС
+    DECLARE @offset DECIMAL(10,2) = 0.50;  -- Стандартный диапазон ±0.50
+    DECLARE @step DECIMAL(10,2) = 0.01;  -- Шаг перебора
+    DECLARE @candidate DECIMAL(10,2);  -- Текущий кандидат без НДС
+    DECLARE @candidateWithNDS DECIMAL(10,2);  -- Цена с НДС для кандидата
+    DECLARE @minError DECIMAL(10,2) = 999999.99;  -- большое начальное значение
+    DECLARE @bestCandidate DECIMAL(10,2);  -- Лучший кандидат
+    DECLARE @error DECIMAL(10,2);  -- Текущая ошибка
+
+    -- Обработка крайних случаев и ошибок
+    IF @ProcNDS < 0 OR @ProcNDS >= 100 OR @InputPriceWithNDS < 0
+    BEGIN
+        SET @CorrectedPriceWithoutNDS = 0.00;
+        SET @CorrectedPriceWithNDS = 0.00;
+        RETURN;
+    END
+    IF @ProcNDS = 0
+    BEGIN
+        SET @CorrectedPriceWithoutNDS = @InputPriceWithNDS;
+        SET @CorrectedPriceWithNDS = @InputPriceWithNDS;
+        RETURN;
+    END
+    IF @InputPriceWithNDS = 0
+    BEGIN
+        SET @CorrectedPriceWithoutNDS = 0.00;
+        SET @CorrectedPriceWithNDS = 0.00;
+        RETURN;
+    END
+
+    -- Расчёт базовой цены без НДС
+    SET @basePrice = ROUND(@InputPriceWithNDS / @k, 2);
+
+    -- Адаптация offset для больших цен (>100)
+    IF @InputPriceWithNDS > 100.00
+        SET @offset = 1.00;
+
+    -- Перебор кандидатов в диапазоне [basePrice - offset, basePrice + offset] с шагом 0.01
+    SET @candidate = @basePrice - @offset;
+    WHILE @candidate <= @basePrice + @offset
+    BEGIN
+        -- Вычисление цены с НДС и ошибки
+        SET @candidateWithNDS = ROUND(@candidate * @k, 2);
+        SET @error = ABS(@candidateWithNDS - @InputPriceWithNDS);
+
+        -- Если ошибка меньше минимальной, обновляем лучший кандидат
+        IF @error < @minError
+        BEGIN
+            SET @minError = @error;
+            SET @bestCandidate = @candidate;
+        END
+
+        -- Следующий кандидат
+        SET @candidate = @candidate + @step;
+    END
+
+    -- Установка результатов
+    SET @CorrectedPriceWithoutNDS = @bestCandidate;
+    SET @CorrectedPriceWithNDS = ROUND(@bestCandidate * @k, 2);
+END
+GO
+
+-- Пример тестовой процедуры 
+ALTER PROCEDURE TestCalcPricesBruteForce
+AS
+BEGIN
+    DECLARE @testCases TABLE (
+        InputPriceWithNDS DECIMAL(10,2),
+        ProcNDS DECIMAL(5,2),
+        ExpectedCorrectedPriceWithNDS DECIMAL(10,2),
+        ExpectedCorrectedPriceWithoutNDS DECIMAL(10,2)
+    );
+
+    -- Тестовые случаи 
+    INSERT INTO @testCases VALUES
+        (1.81, 20, 1.80, 1.50),
+        (1.81, 18, 1.77, 1.50), 
+        (0.00, 20, 0.00, 0.00),
+        (50.00, 0, 50.00, 50.00),
+        (100.00, 999, 0.00, 0.00),
+        (-10.00, 20, 0.00, 0.00),
+        (10.00, -5, 0.00, 0.00),
+        (10.00, 108, 0.00, 0.00),
+        (1266773.46, 22, 1266773.46, 1038333.82);
+
+    -- Перебор и вызов
+    DECLARE @InputPriceWithNDS DECIMAL(10,2), @ProcNDS DECIMAL(5,2),
+            @CorrectedPriceWithNDS DECIMAL(10,2), @CorrectedPriceWithoutNDS DECIMAL(10,2);
+
+    DECLARE test_cursor CURSOR FOR
+        SELECT InputPriceWithNDS, ProcNDS FROM @testCases;
+
+    OPEN test_cursor;
+    FETCH NEXT FROM test_cursor INTO @InputPriceWithNDS, @ProcNDS;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        EXEC CalcPricesBruteForce @InputPriceWithNDS, @ProcNDS, @CorrectedPriceWithNDS OUTPUT, @CorrectedPriceWithoutNDS OUTPUT;
+        PRINT 'Input: ' + CAST(@InputPriceWithNDS AS VARCHAR) + ', NDS%: ' + CAST(@ProcNDS AS VARCHAR) +
+              ' -> WithNDS: ' + CAST(@CorrectedPriceWithNDS AS VARCHAR) +
+              ', WithoutNDS: ' + CAST(@CorrectedPriceWithoutNDS AS VARCHAR);
+        FETCH NEXT FROM test_cursor INTO @InputPriceWithNDS, @ProcNDS;
+    END
+
+    CLOSE test_cursor;
+    DEALLOCATE test_cursor;
+END
+GO
+
+EXEC TestCalcPrices;
